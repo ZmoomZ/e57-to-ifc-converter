@@ -68,15 +68,24 @@ async def process_task(task_id: str):
     # Обновляем статус
     tasks_storage[task_id]["status"] = "processing"
     
-    # TODO: Здесь будет вызов функции обработки
-    # from app.processing import process_point_cloud
-    # result = process_point_cloud(task_id)
+    # Импортируем и запускаем обработку
+    from app.processing import process_point_cloud
     
-    return {
-        "task_id": task_id,
-        "status": "processing",
-        "message": "Обработка запущена"
-    }
+    try:
+        result = process_point_cloud(task_id)
+        
+        # Обновляем информацию о задаче
+        tasks_storage[task_id].update(result)
+        
+        return {
+            "task_id": task_id,
+            "status": result["status"],
+            "message": result["message"]
+        }
+    except Exception as e:
+        tasks_storage[task_id]["status"] = "error"
+        tasks_storage[task_id]["error"] = str(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/model/{task_id}")
 async def get_model(task_id: str):
