@@ -10,6 +10,7 @@ ENV/
 *.egg-info/
 dist/
 build/
+*.pyc
 
 # Node
 node_modules/
@@ -30,8 +31,22 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Project specific
-uploads/
+# Project specific - uploaded files
+backend/uploads/
+backend/processed/
+backend/models/
+backend/exports/
+
+# Large files
 *.e57
 *.ifc
 *.ply
+*.las
+*.laz
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log

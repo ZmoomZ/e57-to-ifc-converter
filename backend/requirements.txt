@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pye57
+open3d
+ifcopenshell
+numpy
+scipy
+opencv-python
+pandas
