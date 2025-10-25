@@ -25,9 +25,9 @@ class IFCGenerator:
         with open(self.model_path, 'r') as f:
             return json.load(f)
     
-    def create_ifc_structure(self):
+    def create_ifc_structure(self, storeys_count: int = 1):
         """
-        Создание базовой структуры IFC файла
+        Создание базовой структуры IFC файла с поддержкой нескольких этажей
         """
         # Создаем новый IFC4 файл
         self.ifc_file = ifcopenshell.file(schema="IFC4")
@@ -73,74 +73,67 @@ class IFCGenerator:
             products=[self.building]
         )
         
-        # Создаем Storey (этаж)
-        self.storey = ifcopenshell.api.run("root.create_entity", self.ifc_file,
-            ifc_class="IfcBuildingStorey",
-            name="Ground Floor"
-        )
-        ifcopenshell.api.run("aggregate.assign_object", self.ifc_file,
-            relating_object=self.building, 
-            products=[self.storey]
-        )
+        # Создаем этажи
+        self.storeys = {}
+        if storeys_count > 1:
+            for i in range(storeys_count):
+                storey = ifcopenshell.api.run("root.create_entity", self.ifc_file,
+                    ifc_class="IfcBuildingStorey",
+                    name=f"Floor {i}"
+                )
+                ifcopenshell.api.run("aggregate.assign_object", self.ifc_file,
+                    relating_object=self.building, 
+                    products=[storey]
+                )
+                self.storeys[i] = storey
+        else:
+            # Один этаж по умолчанию
+            self.storey = ifcopenshell.api.run("root.create_entity", self.ifc_file,
+                ifc_class="IfcBuildingStorey",
+                name="Ground Floor"
+            )
+            ifcopenshell.api.run("aggregate.assign_object", self.ifc_file,
+                relating_object=self.building, 
+                products=[self.storey]
+            )
+            self.storeys[0] = self.storey
         
-        print("IFC структура создана")
+        print(f"IFC структура создана ({storeys_count} этажей)")
     
-    def create_slab(self, slab_data: Dict[str, Any]):
+    def create_slab(self, slab_data: Dict[str, Any], bounds: Dict[str, List[float]]):
         """
-        Создание плиты (IfcSlab)
+        Создание плиты (IfcSlab) с геометрией
         """
         slab = ifcopenshell.api.run("root.create_entity", self.ifc_file,
             ifc_class="IfcSlab",
             name=f"Slab at Z={slab_data['z']:.2f}"
         )
         
-        # Простая прямоугольная геометрия (для MVP)
-        # TODO: использовать реальные контуры из сегментации
+        z_level = slab_data['z']
+        thickness = slab_data['thickness']
         
-        ifcopenshell.api.run("spatial.assign_container", self.ifc_file,
-            relating_structure=self.storey,
-            products=[slab]
-        )
+        # Используем границы модели для размера плиты
+        min_bounds = bounds['min']
+        max_bounds = bounds['max']
         
-        return slab
-    
-    def create_wall(self, wall_data: Dict[str, Any]):
-        """
-        Создание стены (IfcWall) с геометрией
-        """
-        wall = ifcopenshell.api.run("root.create_entity", self.ifc_file,
-            ifc_class="IfcWall",
-            name="Wall"
-        )
+        length = max_bounds[0] - min_bounds[0]
+        width = max_bounds[1] - min_bounds[1]
+        center_x = (max_bounds[0] + min_bounds[0]) / 2
+        center_y = (max_bounds[1] + min_bounds[1]) / 2
         
-        # Создаем простую геометрию стены (экструдированный прямоугольник)
-        start = wall_data['start']
-        end = wall_data['end']
-        height = wall_data['height']
-        thickness = wall_data['thickness']
-        
-        # Вычисляем длину и направление стены
-        import math
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx**2 + dy**2)
-        
-        if length < 0.1:  # Слишком короткая стена
-            return None
-        
-        # Создаем представление (representation)
+        # Получаем контекст
         context = self.ifc_file.by_type("IfcGeometricRepresentationSubContext")[0]
         
-        # Создаем простой прямоугольный профиль
+        # Создаем прямоугольный профиль плиты
         rectangle = self.ifc_file.create_entity("IfcRectangleProfileDef",
             ProfileType="AREA",
             XDim=length,
-            YDim=thickness
+            YDim=width
         )
         
-        # Позиция для экструзии
-        position = self.ifc_file.create_entity("IfcAxis2Placement3D",
-            Location=self.ifc_file.create_entity("IfcCartesianPoint", Coordinates=(start[0], start[1], start[2])),
+        # Позиция экструзии
+        extrusion_position = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=self.ifc_file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
             Axis=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
             RefDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0))
         )
@@ -148,9 +141,97 @@ class IFCGenerator:
         # Экструдированная геометрия
         extrusion = self.ifc_file.create_entity("IfcExtrudedAreaSolid",
             SweptArea=rectangle,
-            Position=self.ifc_file.create_entity("IfcAxis2Placement3D",
-                Location=self.ifc_file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0))
-            ),
+            Position=extrusion_position,
+            ExtrudedDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
+            Depth=thickness
+        )
+        
+        # Создаем representation
+        body_representation = self.ifc_file.create_entity("IfcShapeRepresentation",
+            ContextOfItems=context,
+            RepresentationIdentifier="Body",
+            RepresentationType="SweptSolid",
+            Items=[extrusion]
+        )
+        
+        product_shape = self.ifc_file.create_entity("IfcProductDefinitionShape",
+            Representations=[body_representation]
+        )
+        
+        slab.Representation = product_shape
+        
+        # Размещение плиты
+        placement_location = self.ifc_file.create_entity("IfcCartesianPoint", 
+            Coordinates=(center_x, center_y, z_level)
+        )
+        
+        axis_placement = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=placement_location
+        )
+        
+        slab.ObjectPlacement = self.ifc_file.create_entity("IfcLocalPlacement",
+            RelativePlacement=axis_placement
+        )
+        
+        ifcopenshell.api.run("spatial.assign_container", self.ifc_file,
+            relating_structure=self.storeys[0],
+            products=[slab]
+        )
+        
+        return slab
+    
+    def create_wall(self, wall_data: Dict[str, Any]):
+        """
+        Создание стены (IfcWall) с правильной геометрией и ориентацией
+        """
+        import math
+        
+        wall = ifcopenshell.api.run("root.create_entity", self.ifc_file,
+            ifc_class="IfcWall",
+            name="Wall"
+        )
+        
+        start = wall_data['start']
+        end = wall_data['end']
+        height = wall_data['height']
+        thickness = wall_data['thickness']
+        
+        # Вычисляем длину и угол стены
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.sqrt(dx**2 + dy**2)
+        
+        if length < 0.1:  # Слишком короткая стена
+            return None
+        
+        # Вычисляем угол поворота стены
+        angle = math.atan2(dy, dx)
+        
+        # Направления для правильной ориентации
+        cos_angle = math.cos(angle)
+        sin_angle = math.sin(angle)
+        
+        # Получаем контекст
+        context = self.ifc_file.by_type("IfcGeometricRepresentationSubContext")[0]
+        
+        # Создаем прямоугольный профиль стены
+        rectangle = self.ifc_file.create_entity("IfcRectangleProfileDef",
+            ProfileType="AREA",
+            XDim=length,
+            YDim=thickness
+        )
+        
+        # Позиция экструзии (в начале стены)
+        extrusion_position = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=self.ifc_file.create_entity("IfcCartesianPoint", Coordinates=(0.0, -thickness/2, 0.0)),
+            Axis=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
+            RefDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0))
+        )
+        
+        # Экструдированная геометрия
+        extrusion = self.ifc_file.create_entity("IfcExtrudedAreaSolid",
+            SweptArea=rectangle,
+            Position=extrusion_position,
             ExtrudedDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
             Depth=height
         )
@@ -168,12 +249,36 @@ class IFCGenerator:
         )
         
         wall.Representation = product_shape
-        wall.ObjectPlacement = self.ifc_file.create_entity("IfcLocalPlacement",
-            RelativePlacement=position
+        
+        # Размещение стены в пространстве с правильным поворотом
+        placement_location = self.ifc_file.create_entity("IfcCartesianPoint", 
+            Coordinates=(start[0], start[1], start[2])
         )
         
+        placement_axis = self.ifc_file.create_entity("IfcDirection", 
+            DirectionRatios=(0.0, 0.0, 1.0)
+        )
+        
+        placement_ref_direction = self.ifc_file.create_entity("IfcDirection", 
+            DirectionRatios=(cos_angle, sin_angle, 0.0)
+        )
+        
+        axis_placement = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=placement_location,
+            Axis=placement_axis,
+            RefDirection=placement_ref_direction
+        )
+        
+        wall.ObjectPlacement = self.ifc_file.create_entity("IfcLocalPlacement",
+            RelativePlacement=axis_placement
+        )
+        
+        # Определяем этаж для размещения
+        storey_idx = wall_data.get('storey', 0)
+        target_storey = self.storeys.get(storey_idx, self.storeys[0])
+        
         ifcopenshell.api.run("spatial.assign_container", self.ifc_file,
-            relating_structure=self.storey,
+            relating_structure=target_storey,
             products=[wall]
         )
         
@@ -181,15 +286,76 @@ class IFCGenerator:
     
     def create_column(self, column_data: Dict[str, Any]):
         """
-        Создание колонны (IfcColumn)
+        Создание колонны (IfcColumn) с геометрией
         """
         column = ifcopenshell.api.run("root.create_entity", self.ifc_file,
             ifc_class="IfcColumn",
-            name=f"Column"
+            name="Column"
         )
         
+        position = column_data['position']
+        height = column_data['height']
+        width = column_data['width']
+        depth = column_data['depth']
+        
+        # Получаем контекст
+        context = self.ifc_file.by_type("IfcGeometricRepresentationSubContext")[0]
+        
+        # Создаем прямоугольный профиль колонны
+        rectangle = self.ifc_file.create_entity("IfcRectangleProfileDef",
+            ProfileType="AREA",
+            XDim=width,
+            YDim=depth
+        )
+        
+        # Позиция экструзии
+        extrusion_position = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=self.ifc_file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
+            Axis=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
+            RefDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0))
+        )
+        
+        # Экструдированная геометрия
+        extrusion = self.ifc_file.create_entity("IfcExtrudedAreaSolid",
+            SweptArea=rectangle,
+            Position=extrusion_position,
+            ExtrudedDirection=self.ifc_file.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
+            Depth=height
+        )
+        
+        # Создаем representation
+        body_representation = self.ifc_file.create_entity("IfcShapeRepresentation",
+            ContextOfItems=context,
+            RepresentationIdentifier="Body",
+            RepresentationType="SweptSolid",
+            Items=[extrusion]
+        )
+        
+        product_shape = self.ifc_file.create_entity("IfcProductDefinitionShape",
+            Representations=[body_representation]
+        )
+        
+        column.Representation = product_shape
+        
+        # Размещение колонны
+        placement_location = self.ifc_file.create_entity("IfcCartesianPoint", 
+            Coordinates=(position[0], position[1], position[2])
+        )
+        
+        axis_placement = self.ifc_file.create_entity("IfcAxis2Placement3D",
+            Location=placement_location
+        )
+        
+        column.ObjectPlacement = self.ifc_file.create_entity("IfcLocalPlacement",
+            RelativePlacement=axis_placement
+        )
+        
+        # Определяем этаж для размещения
+        storey_idx = column_data.get('storey', 0)
+        target_storey = self.storeys.get(storey_idx, self.storeys[0])
+        
         ifcopenshell.api.run("spatial.assign_container", self.ifc_file,
-            relating_structure=self.storey,
+            relating_structure=target_storey,
             products=[column]
         )
         
@@ -206,11 +372,14 @@ class IFCGenerator:
         elements = model_data['elements']
         
         # 2. Создаем структуру IFC
-        self.create_ifc_structure()
+        storeys_count = len(model_data.get('storeys', []))
+        if storeys_count == 0:
+            storeys_count = 1
+        self.create_ifc_structure(storeys_count)
         
         # 3. Создаем плиты
         for slab in elements['slabs']:
-            self.create_slab(slab)
+            self.create_slab(slab, model_data['bounds'])
         
         # 4. Создаем стены
         for wall in elements['walls']:

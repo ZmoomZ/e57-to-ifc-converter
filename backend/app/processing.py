@@ -214,6 +214,56 @@ def detect_columns(point_cloud: o3d.geometry.PointCloud, grid_size: float = 0.5)
     
     print(f"Найдено колонн: {len(columns)}")
     return columns
+
+def segment_by_storeys(point_cloud: o3d.geometry.PointCloud, slabs: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    """
+    Разделение облака точек по этажам на основе плит
+    """
+    print("\nРазделение по этажам...")
+    
+    points = np.asarray(point_cloud.points)
+    
+    # Сортируем плиты по высоте
+    sorted_slabs = sorted(slabs, key=lambda s: s['z'])
+    
+    storeys = {}
+    
+    for i in range(len(sorted_slabs) - 1):
+        floor_slab = sorted_slabs[i]
+        ceiling_slab = sorted_slabs[i + 1]
+        
+        z_min = floor_slab['z']
+        z_max = ceiling_slab['z']
+        storey_height = z_max - z_min
+        
+        # Пропускаем слишком низкие "этажи" (менее 2м)
+        if storey_height < 2.0:
+            continue
+        
+        # Выбираем точки этажа
+        z_coords = points[:, 2]
+        storey_mask = (z_coords >= z_min) & (z_coords <= z_max)
+        storey_points = points[storey_mask]
+        
+        if len(storey_points) < 1000:  # Минимум точек для этажа
+            continue
+        
+        # Создаем облако точек для этажа
+        storey_cloud = o3d.geometry.PointCloud()
+        storey_cloud.points = o3d.utility.Vector3dVector(storey_points)
+        
+        storeys[i] = {
+            'floor_z': z_min,
+            'ceiling_z': z_max,
+            'height': storey_height,
+            'point_cloud': storey_cloud,
+            'floor_slab': floor_slab,
+            'ceiling_slab': ceiling_slab
+        }
+        
+        print(f"  Этаж {i}: высота={storey_height:.2f}м, точек={len(storey_points)}")
+    
+    return storeys
 class PointCloudProcessor:
     """
     Класс для обработки облаков точек E57
@@ -288,28 +338,77 @@ class PointCloudProcessor:
         o3d.io.write_point_cloud(output_path, self.downsampled_cloud)
         print(f"Облако сохранено: {output_path}")
         return output_path
-    def segment_building_elements(self) -> Dict[str, List[Dict[str, Any]]]:
+    
+    def segment_building_elements(self) -> Dict[str, Any]:
         """
-        Сегментация элементов здания
+        Сегментация элементов здания с разделением по этажам
         """
         print("\n=== Начало сегментации ===")
         
-        # Используем downsampled облако для сегментации
         cloud = self.downsampled_cloud
         
-        # 1. Определяем плиты
-        slabs = detect_slabs(cloud)
+        # 1. Определяем плиты (все этажи)
+        all_slabs = detect_slabs(cloud)
         
-        # 2. Определяем стены
-        walls = detect_walls(cloud)
+        if len(all_slabs) < 2:
+            print("Недостаточно плит для разделения на этажи, обрабатываем как один этаж")
+            # Обрабатываем всё здание как один этаж
+            walls = detect_walls(cloud)
+            columns = detect_columns(cloud)
+            
+            return {
+                'slabs': all_slabs,
+                'walls': walls,
+                'columns': columns,
+                'storeys': []
+            }
         
-        # 3. Определяем колонны
-        columns = detect_columns(cloud)
+        # 2. Разделяем на этажи
+        storeys_data = segment_by_storeys(cloud, all_slabs)
+        
+        # 3. Обрабатываем каждый этаж отдельно
+        all_walls = []
+        all_columns = []
+        storeys_info = []
+        
+        for storey_idx, storey in storeys_data.items():
+            print(f"\n--- Обработка этажа {storey_idx} ---")
+            
+            # Сегментация стен для этажа
+            walls = detect_walls(storey['point_cloud'])
+            
+            # Корректируем высоту стен
+            for wall in walls:
+                wall['height'] = storey['height']
+                wall['storey'] = storey_idx
+            
+            # Сегментация колонн для этажа
+            columns = detect_columns(storey['point_cloud'])
+            
+            # Корректируем высоту колонн
+            for column in columns:
+                column['height'] = storey['height']
+                column['storey'] = storey_idx
+            
+            all_walls.extend(walls)
+            all_columns.extend(columns)
+            
+            storeys_info.append({
+                'index': storey_idx,
+                'floor_z': storey['floor_z'],
+                'ceiling_z': storey['ceiling_z'],
+                'height': storey['height'],
+                'walls_count': len(walls),
+                'columns_count': len(columns)
+            })
+        
+        print(f"\nИтого: {len(all_slabs)} плит, {len(all_walls)} стен, {len(all_columns)} колонн")
         
         return {
-            'slabs': slabs,
-            'walls': walls,
-            'columns': columns
+            'slabs': all_slabs,
+            'walls': all_walls,
+            'columns': all_columns,
+            'storeys': storeys_info
         }
     
     def save_model_data(self, elements: Dict[str, List[Dict[str, Any]]]):
